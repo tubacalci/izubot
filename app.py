@@ -119,6 +119,6 @@ def chat():
     full_response = mixtral_response(user_input, context=matched_answer)
     return jsonify({"response": full_response})
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
     app.run(host="0.0.0.0", port=port)
