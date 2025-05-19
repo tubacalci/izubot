@@ -1,40 +1,72 @@
 from flask import Flask, request, jsonify, render_template_string
 import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from difflib import SequenceMatcher
+import numpy as np
+import requests
 import os
 
-app = Flask(__name__)
+app = Flask(_name_)
+# 🔐 API Anahtarı
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or "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"
 
-# Veriyi yükle
-df = pd.read_csv("soru_cevap_veri.csv", encoding="windows-1254", sep=None, engine="python", on_bad_lines='skip')
-df.columns = ["soru", "cevap"]
-df = df.dropna()
+# 🧠 Embedding modeli
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-questions = df["soru"]
-answers = df["cevap"]
+# 📚 Soru-cevap veri kümesini yükle
+df = pd.read_csv("sorucevap.csv", encoding="ISO-8859-9")
+ # CSV dosyanı bu adla aynı klasöre koy
+df = df.dropna()  # eksik verileri temizle
+questions = df["Soru"].tolist()
+answers = df["Cevap"].tolist()
+question_embeddings = embed_model.encode(questions, convert_to_tensor=True)
 
-vectorizer = TfidfVectorizer()
-X = vectorizer.fit_transform(questions)
+# 🔍 En yakın soruyu bul
+def find_most_similar_answer(user_input, top_n=1):
+    user_embedding = embed_model.encode([user_input], convert_to_tensor=True)
+    # Tensörü CPU'ya taşı ve numpy dizisine çevir
+    user_embedding_np = user_embedding.cpu().numpy()
 
-def get_bot_response(user_input):
-    input_vec = vectorizer.transform([user_input])
-    similarities = cosine_similarity(input_vec, X).flatten()
-    best_match = similarities.argmax()
-    if similarities[best_match] < 0.3:
-        return "Üzgünüm, bu konuda bir bilgim yok. Daha sonra tekrar sorun."
-    return answers[best_match]
+    # question_embeddings zaten tensör olduğu için aynı şekilde dönüştür
+    question_embeddings_np = question_embeddings.cpu().numpy()
 
-def is_similar(a, b, threshold=0.7):
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
+    similarities = cosine_similarity(user_embedding_np, question_embeddings_np)[0]
+    top_indices = similarities.argsort()[-top_n:][::-1]
+    matched_qas = [(questions[i], answers[i]) for i in top_indices]
+    return matched_qas[0][1]
 
+
+# 🧠 Mixtral API isteği
+def mixtral_response(prompt, context=""):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "mistralai/mixtral-8x7b-instruct",
+        "messages": [
+            {"role": "system", "content": "Sen bir Türk akademik danışman botsun. Kullanıcıya sadece düzgün ve doğal Türkçe cevap ver. İngilizce veya bozuk cümleler kurma."},
+            {"role": "user", "content": f"Kullanıcının sorusu: {prompt}\n\nİlgili bilgi: {context}"}
+        ]
+    }
+
+    response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=data, headers=headers)
+
+    try:
+        json_resp = response.json()
+        return json_resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print("❌ JSON Hatası veya API Hatası:", response.text)
+        print("Exception:", e)
+        return "Üzgünüm, bir hata oluştu. Lütfen tekrar deneyin."
+
+
+# 💬 HTML arayüz
 HTML_PAGE = '''
 <!doctype html>
 <html>
   <head>
-    <title>İzüBot</title>
+    <title>İzüBot (Mixtral + Veri Seti)</title>
     <style>
       body { font-family: Arial; background: #f0f2f5; padding: 20px; }
       .chatbox { background: white; border-radius: 10px; padding: 20px; max-width: 600px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
@@ -46,16 +78,16 @@ HTML_PAGE = '''
   </head>
   <body>
     <div class="chatbox">
-      <h2>İzüBot 🤖</h2>
+      <h2>İzüBot 🤖 (Mixtral + Veri Seti)</h2>
       <div id="chatlog"></div>
-      <input type="text" id="userInput" placeholder="Bir şeyler yaz..." />
+      <input type="text" id="userInput" placeholder="Bir şeyler yaz..." onkeypress="if(event.key==='Enter')sendMessage()" />
       <button onclick="sendMessage()">Gönder</button>
     </div>
     <script>
       async function sendMessage() {
         const input = document.getElementById("userInput");
         const message = input.value;
-        if (!message) return;
+        if (!message.trim()) return;
         const chatlog = document.getElementById("chatlog");
         chatlog.innerHTML += '<div class="msg user"><strong>Sen:</strong> ' + message + '</div>';
         input.value = "";
@@ -65,8 +97,10 @@ HTML_PAGE = '''
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: message })
         });
+
         const data = await response.json();
         chatlog.innerHTML += '<div class="msg bot"><strong>İzüBot:</strong> ' + data.response + '</div>';
+        chatlog.scrollTop = chatlog.scrollHeight;
       }
     </script>
   </body>
@@ -81,10 +115,10 @@ def home():
 def chat():
     data = request.get_json()
     user_input = data.get("message", "")
-    response = get_bot_response(user_input)
-    return jsonify({"response": response})
+    matched_answer = find_most_similar_answer(user_input)
+    full_response = mixtral_response(user_input, context=matched_answer)
+    return jsonify({"response": full_response})
 
-# 🌐 Render için PORT ayarı
-if __name__ == "__main__":
+if _name_ == "_main_":
     port = int(os.environ.get("PORT", 5050))
     app.run(host="0.0.0.0", port=port)
